@@ -33,15 +33,42 @@ app.get("/balances", async (req, res) => {
   }
 });
 
-// פקודת קנייה/מכירה
-app.post("/order", async (req, res) => {
-  try {
-    const { symbol, side, quantity } = req.body;
-    const r = await client.newOrder(symbol, side, "MARKET", { quantity });
-    res.json(r.data);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
+// לוגיקת DCA אוטומטי
+let lastPrice = null;
+let botActive = false;
 
-app.listen(3001, () => console.log("הבוט פועל על פורט 3001"));
+async function runBot() {
+  try {
+    const r = await client.tickerPrice("BTCUSDT");
+    const price = parseFloat(r.data.price);
+    console.log("מחיר BTC: $" + price);
+
+    if (lastPrice) {
+      const change = ((price - lastPrice) / lastPrice) * 100;
+      
+      // קנה אם המחיר ירד ב-0.5%
+      if (change < -0.5) {
+        console.log("קונה BTC - ירידה של " + change.toFixed(2) + "%");
+        // הסר הערה למסחר אמיתי:
+        // await client.newOrder("BTCUSDT", "BUY", "MARKET", { quoteOrderQty: 10 });
+      }
+      
+      // מכור אם המחיר עלה ב-1%
+      if (change > 1) {
+        console.log("מוכר BTC - עלייה של " + change.toFixed(2) + "%");
+        // הסר הערה למסחר אמיתי:
+        // await client.newOrder("BTCUSDT", "SELL", "MARKET", { quantity: 0.0001 });
+      }
+    }
+    
+    lastPrice = price;
+  } catch (e) {
+    console.log("שגיאה:", e.message);
+  }
+}
+
+// הפעל בוט כל 30 שניות
+setInterval(runBot, 30000);
+runBot();
+
+app.listen(3001, () => console.log("הבוט פועל!"));

@@ -1,9 +1,9 @@
 const Binance = require('node-binance-api');
 const express = require('express');
-
+ 
 const app = express();
 const PORT = process.env.PORT || 3000;
-
+ 
 // ─── הגדרות ───────────────────────────────────────────────
 const CONFIG = {
   TRADE_AMOUNT_USDT: 15,        // כמה USDT לכל עסקה
@@ -17,7 +17,7 @@ const CONFIG = {
   CANDLE_INTERVAL: '15m',
   CANDLE_LIMIT: 100,
 };
-
+ 
 // מטבעות לסריקה – הכי נסחרים בביינאנס
 const SYMBOLS = [
   'BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT',
@@ -30,15 +30,21 @@ const SYMBOLS = [
   'SNXUSDT','CRVUSDT','YFIUSDT','SUSHIUSDT','1INCHUSDT',
   'RUNEUSDT','KAVAUSDT','ZILUSDT','ONTUSDT','ZENUSDT',
 ];
-
+ 
 // ─── Binance Client ────────────────────────────────────────
 const binance = new Binance().options({
   APIKEY: process.env.BINANCE_API_KEY || '',
   APISECRET: process.env.BINANCE_API_SECRET || '',
   useServerTime: true,
   recvWindow: 10000,
+  family: 4,
+  urls: {
+    base: 'https://api1.binance.com/api/',
+    stream: 'wss://stream.binance.com:9443/ws/',
+    combineStream: 'wss://stream.binance.com:9443/stream?streams=',
+  },
 });
-
+ 
 // ─── State ─────────────────────────────────────────────────
 const state = {
   openTrades: {},   // { symbol: { buyPrice, qty, openTime, stopLoss, takeProfit } }
@@ -48,7 +54,7 @@ const state = {
   signals: [],
   isRunning: false,
 };
-
+ 
 // ─── Logging ───────────────────────────────────────────────
 function log(msg, type = 'INFO') {
   const entry = { time: new Date().toISOString(), type, msg };
@@ -56,7 +62,7 @@ function log(msg, type = 'INFO') {
   if (state.log.length > 500) state.log.pop();
   console.log(`[${entry.time}] [${type}] ${msg}`);
 }
-
+ 
 // ─── Math Helpers ──────────────────────────────────────────
 function calcRSI(closes, period = 14) {
   if (closes.length < period + 1) return 50;
@@ -71,7 +77,7 @@ function calcRSI(closes, period = 14) {
   const rs = avgGain / avgLoss;
   return 100 - 100 / (1 + rs);
 }
-
+ 
 function calcEMA(closes, period) {
   const k = 2 / (period + 1);
   let ema = closes[0];
@@ -80,7 +86,7 @@ function calcEMA(closes, period) {
   }
   return ema;
 }
-
+ 
 function calcMACD(closes) {
   const ema12 = calcEMA(closes, 12);
   const ema26 = calcEMA(closes, 26);
@@ -93,7 +99,7 @@ function calcMACD(closes) {
   const signal = calcEMA(macdValues, 9);
   return { macdLine, signal, histogram: macdLine - signal };
 }
-
+ 
 function calcBollingerBands(closes, period = 20, stdDev = 2) {
   const slice = closes.slice(-period);
   const mean = slice.reduce((a, b) => a + b, 0) / period;
@@ -106,27 +112,27 @@ function calcBollingerBands(closes, period = 20, stdDev = 2) {
     bandwidth: (2 * stdDev * std) / mean,
   };
 }
-
+ 
 function calcVolumeSpike(volumes) {
   const avg = volumes.slice(-20).reduce((a, b) => a + b, 0) / 20;
   const current = volumes[volumes.length - 1];
   return current / avg; // >2 = spike
 }
-
+ 
 // ─── Signal Scoring ────────────────────────────────────────
 function scoreSymbol(symbol, candles) {
   const closes  = candles.map(c => parseFloat(c[4]));
   const volumes = candles.map(c => parseFloat(c[5]));
   const current = closes[closes.length - 1];
-
+ 
   const rsi    = calcRSI(closes);
   const macd   = calcMACD(closes);
   const bb     = calcBollingerBands(closes);
   const volSpike = calcVolumeSpike(volumes);
-
+ 
   let score = 0;
   const reasons = [];
-
+ 
   // RSI – oversold = bullish
   if (rsi < CONFIG.RSI_OVERSOLD) {
     score += 30;
@@ -135,7 +141,7 @@ function scoreSymbol(symbol, candles) {
     score -= 20;
     reasons.push(`RSI overbought (${rsi.toFixed(1)})`);
   }
-
+ 
   // MACD – bullish crossover
   if (macd.histogram > 0 && macd.macdLine > macd.signal) {
     score += 25;
@@ -143,7 +149,7 @@ function scoreSymbol(symbol, candles) {
   } else if (macd.histogram < 0) {
     score -= 15;
   }
-
+ 
   // Bollinger Bands – price near lower band
   const bbPosition = (current - bb.lower) / (bb.upper - bb.lower);
   if (bbPosition < 0.2) {
@@ -152,7 +158,7 @@ function scoreSymbol(symbol, candles) {
   } else if (bbPosition > 0.8) {
     score -= 10;
   }
-
+ 
   // Volume spike – confirms momentum
   if (volSpike > 2) {
     score += 20;
@@ -161,16 +167,16 @@ function scoreSymbol(symbol, candles) {
     score += 10;
     reasons.push(`Vol up x${volSpike.toFixed(1)}`);
   }
-
+ 
   // Bandwidth – volatility (wide BB = opportunity)
   if (bb.bandwidth > 0.05) {
     score += 5;
     reasons.push('High volatility');
   }
-
+ 
   return { symbol, score, rsi, macd, bb, volSpike, current, reasons };
 }
-
+ 
 // ─── Trading Logic ─────────────────────────────────────────
 async function getCandles(symbol) {
   return new Promise((resolve, reject) => {
@@ -180,7 +186,7 @@ async function getCandles(symbol) {
     }, { limit: CONFIG.CANDLE_LIMIT });
   });
 }
-
+ 
 async function getBalance(asset = 'USDT') {
   return new Promise((resolve, reject) => {
     binance.balance((err, balances) => {
@@ -189,7 +195,7 @@ async function getBalance(asset = 'USDT') {
     });
   });
 }
-
+ 
 async function getSymbolInfo(symbol) {
   return new Promise((resolve, reject) => {
     binance.exchangeInfo((err, data) => {
@@ -199,26 +205,26 @@ async function getSymbolInfo(symbol) {
     });
   });
 }
-
+ 
 function roundStep(qty, stepSize) {
   const precision = Math.round(-Math.log10(parseFloat(stepSize)));
   return parseFloat(qty.toFixed(precision));
 }
-
+ 
 async function buyMarket(symbol, usdtAmount) {
   try {
     const info = await getSymbolInfo(symbol);
     const lotSize = info.filters.find(f => f.filterType === 'LOT_SIZE');
     const stepSize = lotSize?.stepSize || '0.001';
-
+ 
     // Get current price
     const price = await new Promise((res, rej) =>
       binance.prices(symbol, (err, p) => err ? rej(err) : res(parseFloat(p[symbol])))
     );
-
+ 
     const rawQty = usdtAmount / price;
     const qty = roundStep(rawQty, stepSize);
-
+ 
     return new Promise((resolve, reject) => {
       binance.marketBuy(symbol, qty, (err, response) => {
         if (err) return reject(JSON.parse(err.body || '{}'));
@@ -229,7 +235,7 @@ async function buyMarket(symbol, usdtAmount) {
     throw e;
   }
 }
-
+ 
 async function sellMarket(symbol, qty) {
   return new Promise((resolve, reject) => {
     binance.marketSell(symbol, qty, (err, response) => {
@@ -238,24 +244,24 @@ async function sellMarket(symbol, qty) {
     });
   });
 }
-
+ 
 // ─── Open / Close Trades ───────────────────────────────────
 async function openTrade(signal) {
   if (state.openTrades[signal.symbol]) return;
   if (Object.keys(state.openTrades).length >= CONFIG.MAX_OPEN_TRADES) return;
-
+ 
   try {
     const balance = await getBalance('USDT');
     if (balance < CONFIG.TRADE_AMOUNT_USDT) {
       log(`לא מספיק USDT (${balance.toFixed(2)})`, 'WARN');
       return;
     }
-
+ 
     const result = await buyMarket(signal.symbol, CONFIG.TRADE_AMOUNT_USDT);
     const buyPrice = signal.current;
     const stopLoss = buyPrice * (1 - CONFIG.STOP_LOSS_PCT);
     const takeProfit = buyPrice * (1 + CONFIG.TAKE_PROFIT_PCT);
-
+ 
     state.openTrades[signal.symbol] = {
       buyPrice,
       qty: result.qty,
@@ -265,26 +271,26 @@ async function openTrade(signal) {
       score: signal.score,
       reasons: signal.reasons,
     };
-
+ 
     log(`🟢 BUY ${signal.symbol} @ $${buyPrice.toFixed(4)} | SL: $${stopLoss.toFixed(4)} | TP: $${takeProfit.toFixed(4)} | Score: ${signal.score} | ${signal.reasons.join(', ')}`, 'TRADE');
   } catch (e) {
     log(`שגיאת קנייה ${signal.symbol}: ${e.msg || e.message}`, 'ERROR');
   }
 }
-
+ 
 async function checkAndCloseTrades() {
   for (const [symbol, trade] of Object.entries(state.openTrades)) {
     try {
       const price = await new Promise((res, rej) =>
         binance.prices(symbol, (err, p) => err ? rej(err) : res(parseFloat(p[symbol])))
       );
-
+ 
       const pnlPct = (price - trade.buyPrice) / trade.buyPrice;
-
+ 
       if (price <= trade.stopLoss || price >= trade.takeProfit) {
         await sellMarket(symbol, trade.qty);
         const pnlUsdt = pnlPct * CONFIG.TRADE_AMOUNT_USDT;
-
+ 
         if (price >= trade.takeProfit) {
           state.stats.wins++;
           log(`🎯 TP HIT ${symbol} @ $${price.toFixed(4)} | PnL: +$${pnlUsdt.toFixed(2)} (+${(pnlPct*100).toFixed(2)}%)`, 'WIN');
@@ -292,7 +298,7 @@ async function checkAndCloseTrades() {
           state.stats.losses++;
           log(`🛑 SL HIT ${symbol} @ $${price.toFixed(4)} | PnL: -$${Math.abs(pnlUsdt).toFixed(2)} (${(pnlPct*100).toFixed(2)}%)`, 'LOSS');
         }
-
+ 
         state.stats.totalPnl += pnlUsdt;
         delete state.openTrades[symbol];
       }
@@ -301,20 +307,20 @@ async function checkAndCloseTrades() {
     }
   }
 }
-
+ 
 // ─── Main Scan Loop ────────────────────────────────────────
 async function scanMarket() {
   state.stats.scans++;
   state.lastScan = new Date().toISOString();
   log(`🔍 סריקה #${state.stats.scans} – בודק ${SYMBOLS.length} מטבעות...`);
-
+ 
   await checkAndCloseTrades();
-
+ 
   if (Object.keys(state.openTrades).length >= CONFIG.MAX_OPEN_TRADES) {
     log('מקסימום עסקאות פתוחות – מדלג על סריקה');
     return;
   }
-
+ 
   const scores = [];
   for (const symbol of SYMBOLS) {
     try {
@@ -327,28 +333,28 @@ async function scanMarket() {
       // skip symbol
     }
   }
-
+ 
   scores.sort((a, b) => b.score - a.score);
   state.signals = scores.slice(0, 10);
-
+ 
   const topSignals = scores.filter(s =>
     s.score >= 50 && !state.openTrades[s.symbol]
   );
-
+ 
   log(`📊 Top signal: ${scores[0]?.symbol} score=${scores[0]?.score} | ${scores[0]?.reasons?.join(', ')}`);
-
+ 
   for (const signal of topSignals.slice(0, CONFIG.MAX_OPEN_TRADES)) {
     await openTrade(signal);
   }
 }
-
+ 
 // ─── Web Dashboard ─────────────────────────────────────────
 app.get('/', (req, res) => {
   const openTradesArr = Object.entries(state.openTrades).map(([sym, t]) => ({
     symbol: sym, ...t,
     ageMin: Math.round((Date.now() - t.openTime) / 60000),
   }));
-
+ 
   const html = `<!DOCTYPE html>
 <html lang="he" dir="rtl">
 <head>
@@ -415,7 +421,7 @@ app.get('/', (req, res) => {
 <body>
   <h1>⚡ BINANCE BOT <span class="status-dot"></span></h1>
   <div class="subtitle">עודכן: ${new Date().toLocaleString('he-IL')} | רענון אוטומטי כל 30 שניות</div>
-
+ 
   <div class="grid">
     <div class="card">
       <div class="card-label">סריקות</div>
@@ -436,7 +442,7 @@ app.get('/', (req, res) => {
       <div class="card-value blue">${Object.keys(state.openTrades).length} / ${CONFIG.MAX_OPEN_TRADES}</div>
     </div>
   </div>
-
+ 
   ${openTradesArr.length > 0 ? `
   <div class="section-title">📈 עסקאות פתוחות</div>
   <table>
@@ -455,7 +461,7 @@ app.get('/', (req, res) => {
         </tr>`).join('')}
     </tbody>
   </table>` : '<div class="card" style="margin-bottom:24px"><div class="card-label">אין עסקאות פתוחות כרגע</div></div>'}
-
+ 
   <div class="section-title">🔥 Top Signals (אחרון סריקה)</div>
   <table>
     <thead><tr>
@@ -475,7 +481,7 @@ app.get('/', (req, res) => {
         </tr>`).join('')}
     </tbody>
   </table>
-
+ 
   <div class="section-title">📋 לוג פעולות (אחרון 50)</div>
   <div>
     ${state.log.slice(0, 50).map(e => `
@@ -488,7 +494,7 @@ app.get('/', (req, res) => {
 </html>`;
   res.send(html);
 });
-
+ 
 app.get('/health', (req, res) => res.json({
   status: 'ok',
   uptime: process.uptime(),
@@ -496,15 +502,15 @@ app.get('/health', (req, res) => res.json({
   openTrades: Object.keys(state.openTrades).length,
   totalPnl: state.stats.totalPnl,
 }));
-
+ 
 // ─── Start ─────────────────────────────────────────────────
 app.listen(PORT, () => {
   log(`🚀 Server running on port ${PORT}`);
   log(`⚡ Bot starting – scanning ${SYMBOLS.length} symbols every ${CONFIG.SCAN_INTERVAL_MS / 60000} minutes`);
-
+ 
   // First scan after 10 seconds
   setTimeout(scanMarket, 10_000);
-
+ 
   // Then every N minutes
   setInterval(scanMarket, CONFIG.SCAN_INTERVAL_MS);
 });

@@ -1,0 +1,16 @@
+{
+  "name": "binance-bot",
+  "version": "2.0.0",
+  "description": "Advanced Binance trading bot with RSI, MACD, Bollinger Bands & Volume analysis",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "node-binance-api": "^0.15.0",
+    "express": "^4.18.2"
+  }
+}
